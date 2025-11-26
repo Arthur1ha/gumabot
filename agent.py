@@ -355,9 +355,9 @@ async def entrypoint(ctx: JobContext):
         role = getattr(chat_message, "role", "unknown")
         content = getattr(chat_message, "content", None)  # content 是一个列表
 
-        # # 获取消息的角色和内容
-        # role = getattr(item, "role", "unknown")
-        # content = getattr(item, "content", None) or getattr(item, "text", None)
+        # 如果 content 是列表，将其合并为一个字符串
+        if isinstance(content, list):
+            content = ''.join(content)  # 合并列表中的所有文本内容
         
         # 调试输出：检查 content 是否为 None
         if content is None:
@@ -376,6 +376,8 @@ async def entrypoint(ctx: JobContext):
                     nonlocal current_agent_message, conversation_buffer, turn_count
                     current_agent_message = content  # 赋值给 current_agent_message
 
+                    logger.debug(f"current_message:{current_agent_message}")
+
                     # 如果用户提问存在，保存对话并清空当前消息
                     if current_user_message:
                         turn_count += 1
@@ -384,11 +386,13 @@ async def entrypoint(ctx: JobContext):
                             {"role": "assistant", "content": current_agent_message}
                         ]
                         conversation_buffer.extend(conversation_context)
+                        logger.debug(f"[LiveKit] 当前对话缓冲区内容: {conversation_buffer}")
                         current_user_message = None
                         current_agent_message = None
 
-                        # 每当积累到4条对话后，保存对话
+                        # 每当积累到2条对话后，保存对话
                         if len(conversation_buffer) >= 2:
+                            logger.debug(f"[LiveKit] 缓冲区已满，准备保存对话到 MemU")
                             asyncio.create_task(
                                 save_conversation_to_memu(
                                     conversation_buffer.copy(),
