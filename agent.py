@@ -2,41 +2,33 @@ import logging
 import os
 import asyncio
 import sys
-from typing import Optional
-
+import requests
 from dotenv import load_dotenv
 from memu import MemuClient
-
-from livekit import agents, rtc
+from livekit import agents
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
     inference,
     JobContext,
-    JobProcess,
-    MetricsCollectedEvent,
-    RunContext,
-    cli,
-    metrics,
     room_io,
 )
-
 from livekit.plugins import silero
 from livekit.plugins import openai
-from openai.types.beta.realtime.session import TurnDetection
+from livekit.plugins import deepgram
 
-# uncomment to enable Krisp background voice/noise cancellation
-# from livekit.plugins import noise_cancellation
-
-logger = logging.getLogger("basic-agent")
-
+logger = logging.getLogger("guma-agent")
 
 #OPENAI-API
 load_dotenv(override=True)
 api_key = os.getenv("OPENAI_APIKEY")
 base_url = os.getenv("BASE_URL")
 memu_api_key = os.getenv("MEMU_API_KEY")  # MemU API 密钥
+MEMU_API_BASE = "https://api.memu.so/api/v1"
+deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")  # Deepgram API 密钥
+# print(f"OPENAI_APIKEY: {api_key}")
+# print(f"BASE_URL: {base_url}")
 
 # 初始化 MemU 客户端
 if memu_api_key:
@@ -44,33 +36,20 @@ if memu_api_key:
         base_url="https://api.memu.so",
         api_key=memu_api_key
     )
-    logger.info("=" * 60)
     logger.info("[MEMU] ✅ MemU 客户端初始化成功")
-    logger.info(f"[MEMU] API 端点: https://api.memu.so")
-    logger.info("=" * 60)
 else:
     memu_client = None
-    logger.warning("=" * 60)
     logger.warning("[MEMU] ⚠️  MemU API 密钥未设置，记忆功能将被禁用")
-    logger.warning("[MEMU] 请在环境变量中设置 MEMU_API_KEY")
-    logger.warning("=" * 60)
-
-# print(api_key)
-# print(base_url)
-
 
 # ============================================================================
 # MemU 记忆层功能函数
 # ============================================================================
-
 def retrieve_user_memories(user_id: str, agent_id: str):
     """
     从 MemU 检索用户的历史记忆
-    
     参数:
         user_id: 用户唯一标识符
         agent_id: 代理唯一标识符
-    
     返回:
         dict: 包含记忆分类的字典，如果失败则返回空字典
     """
@@ -87,16 +66,14 @@ def retrieve_user_memories(user_id: str, agent_id: str):
             user_id=user_id,
             agent_id=agent_id
         )
-        
-        # 详细记录检索结果
-        if memories and 'categories' in memories:
-            category_count = len(memories['categories'])
+        categories = extract_categories(memories)
+        if categories:
+            category_count = len(categories)
             logger.info(f"[MEMU] ✅ 成功检索到 {category_count} 个记忆分类")
-            
-            for idx, category in enumerate(memories['categories'], 1):
-                category_name = category.get('name', '未知分类')
-                has_summary = bool(category.get('summary'))
-                summary_preview = category.get('summary', '')[:50] + '...' if category.get('summary') else '无摘要'
+            for idx, category in enumerate(categories, 1):
+                category_name = extract_value(category, 'name') or '未知分类'
+                summary_val = extract_value(category, 'summary') or ''
+                summary_preview = (summary_val[:50] + '...') if summary_val else '无摘要'
                 logger.info(f"[MEMU]   分类 {idx}: {category_name} (摘要: {summary_preview})")
         else:
             logger.info("[MEMU] ℹ️  未找到历史记忆（新用户或首次对话）")
@@ -120,37 +97,42 @@ def build_system_prompt_with_memories(base_instructions: str, memories: dict) ->
         str: 包含记忆信息的完整系统提示词
     """
     system_prompt = base_instructions
-    memory_added = False
+    logger.info(f"system_prompt:{system_prompt}")
     
-    # 如果有记忆，添加到提示词中
-    if memories and 'categories' in memories:
+    categories = extract_categories(memories)
+    if categories:
         memory_context = "\n\n以下是关于用户的信息：\n\n"
         added_categories = 0
-        
-        for category in memories['categories']:
-            if category.get('summary'):
-                category_name = category.get('name', '未知分类')
-                category_summary = category['summary']
+        for category in categories:
+            category_summary = extract_value(category, 'summary')
+            if category_summary:
+                category_name = extract_value(category, 'name') or '未知分类'
                 memory_context += f"**{category_name}:** {category_summary}\n\n"
                 added_categories += 1
-        
         if added_categories > 0:
             system_prompt += memory_context
-            memory_added = True
             logger.info(f"[MEMU] 📝 已将 {added_categories} 个记忆分类添加到系统提示词")
-            logger.info(f"[MEMU]   提示词总长度: {len(system_prompt)} 字符")
+            logger.info(f"new_system_prompt:{system_prompt}")
         else:
             logger.info("[MEMU] ℹ️  记忆分类中没有可用摘要，未添加到提示词")
     else:
         logger.info("[MEMU] ℹ️  无记忆数据，使用基础系统提示词")
     
-    if not memory_added:
-        logger.info("[MEMU] ⚠️  系统提示词中未包含记忆信息（将使用基础提示词）")
-    
     return system_prompt
 
+def extract_categories(memories):
+    if not memories:
+        return []
+    if isinstance(memories, dict):
+        return memories.get('categories', []) or []
+    if hasattr(memories, 'categories'):
+        return getattr(memories, 'categories') or []
+    return []
 
-async def save_conversation_to_memu(conversation: list, user_id: str, agent_id: str):
+def extract_value(item, key):
+    return item.get(key) if isinstance(item, dict) else getattr(item, key, None)
+
+async def save_conversation_to_memu(conversation: list, user_id: str, agent_id: str, assistant=None, base_instructions: str=None):
     """
     异步保存对话到 MemU 记忆系统
     
@@ -172,7 +154,8 @@ async def save_conversation_to_memu(conversation: list, user_id: str, agent_id: 
         logger.info(f"[MEMU]   对话消息数: {message_count}")
         
         # 显示对话预览
-        for idx, msg in enumerate(conversation[:4], 1):  # 只显示前4条
+        for idx, msg in enumerate(conversation): # 显示全部 
+        # for idx, msg in enumerate(conversation[:4], 1):  # 只显示前4条
             role = msg.get('role', 'unknown')
             content_preview = msg.get('content', '')[:50] + '...' if len(msg.get('content', '')) > 50 else msg.get('content', '')
             logger.info(f"[MEMU]   消息 {idx} ({role}): {content_preview}")
@@ -195,12 +178,58 @@ async def save_conversation_to_memu(conversation: list, user_id: str, agent_id: 
         logger.info(f"[MEMU] ✅ 对话已成功提交到 MemU")
         logger.info(f"[MEMU]   任务 ID: {task_id}")
         logger.info(f"[MEMU]   消息数: {message_count}")
+        if assistant and base_instructions:
+            asyncio.create_task(
+                refresh_memories_and_update_prompt_with_task(
+                    task_id,
+                    user_id,
+                    agent_id,
+                    assistant,
+                    base_instructions
+                )
+            )
         
     except Exception as error:
         logger.error(f"[MEMU] ❌ 保存对话时发生错误: {error}")
         logger.error(f"[MEMU]   错误类型: {type(error).__name__}")
         import traceback
         logger.error(f"[MEMU]   错误详情:\n{traceback.format_exc()}")
+
+async def refresh_memories_and_update_prompt_with_task(task_id: str, user_id: str, agent_id: str, assistant, base_instructions: str, attempts: int = 10, delay: float = 2.0):
+    if not memu_api_key:
+        return await refresh_memories_and_update_prompt_fallback(user_id, agent_id, assistant, base_instructions, attempts, delay)
+    for i in range(attempts):
+        try:
+            resp = requests.get(f"{MEMU_API_BASE}/memory/memorize/status/{task_id}", headers={"Authorization": f"Bearer {memu_api_key}"}, timeout=10)
+            status = resp.json() if resp.ok else None
+        except Exception:
+            status = None
+        if status == "completed":
+            memories = retrieve_user_memories(user_id, agent_id)
+            categories = extract_categories(memories)
+            summaries = [c for c in categories if extract_value(c, 'summary')]
+            if summaries:
+                updated = build_system_prompt_with_memories(base_instructions, memories)
+                assistant.instructions = updated
+                logger.info(f"[MEMU] 🔧 更新后的系统提示词: {updated}")
+                logger.info(f"[MEMU] ✅ 已刷新记忆并更新提示词，摘要条目: {len(summaries)}")
+                return
+        await asyncio.sleep(delay)
+    return await refresh_memories_and_update_prompt_fallback(user_id, agent_id, assistant, base_instructions, 5, delay)
+
+async def refresh_memories_and_update_prompt_fallback(user_id: str, agent_id: str, assistant, base_instructions: str, attempts: int, delay: float):
+    for i in range(attempts):
+        memories = retrieve_user_memories(user_id, agent_id)
+        categories = extract_categories(memories)
+        summaries = [c for c in categories if extract_value(c, 'summary')]
+        if summaries:
+            updated = build_system_prompt_with_memories(base_instructions, memories)
+            assistant.instructions = updated
+            logger.info(f"[MEMU] 🔧 更新后的系统提示词: {updated}")
+            logger.info(f"[MEMU] ✅ 已刷新记忆并更新提示词，摘要条目: {len(summaries)}")
+            return
+        await asyncio.sleep(delay)
+    logger.info("[MEMU] ℹ️  重试后仍无摘要，保持基础提示词")
 
 
 # ============================================================================
@@ -209,11 +238,12 @@ async def save_conversation_to_memu(conversation: list, user_id: str, agent_id: 
 
 class Assistant(Agent):
     def __init__(self, instructions: str = None) -> None:
-        base_instructions = """你是一个有用的语音人工智能助手。你热心地帮助用户解答他们的问题，从你广博的知识中提供信息。
-            你的回答简洁明了，没有任何复杂的格式或标点符号，包括表情符号、星号或其他符号。你好奇、友善，而且有幽默感。"""
+        # base_instructions = """你是一个有用的语音人工智能助手。你热心地帮助用户解答他们的问题，从你广博的知识中提供信息。
+        #     你的回答简洁明了，没有任何复杂的格式或标点符号，包括表情符号、星号或其他符号。你好奇、友善，而且有幽默感。将回复内容控制在20字以内"""
         
-        final_instructions = instructions if instructions else base_instructions
-        super().__init__(instructions=final_instructions)
+        # final_instructions = instructions if instructions else base_instructions
+        # super().__init__(instructions=final_instructions)
+        super().__init__(instructions=instructions)
 
 server = AgentServer()
 
@@ -250,8 +280,10 @@ async def entrypoint(ctx: JobContext):
     logger.info("")
     logger.info("[MEMU] 🔨 构建系统提示词...")
     base_instructions = """你是一个有用的语音人工智能助手。你热心地帮助用户解答他们的问题，从你广博的知识中提供信息。
-            你的回答简洁明了，没有任何复杂的格式或标点符号，包括表情符号、星号或其他符号。你好奇、友善，而且有幽默感。"""
+            你的回答简洁明了，没有任何复杂的格式或标点符号，包括表情符号、星号或其他符号。你好奇、友善，而且有幽默感。将回复内容控制在20字以内"""
+    logger.info(f"[MEMU] 🧭 基础系统提示词: {base_instructions}")
     dynamic_instructions = build_system_prompt_with_memories(base_instructions, user_memories)
+    logger.info(f"[MEMU] 🔧 动态系统提示词: {dynamic_instructions}")
     
     # 创建带记忆的 Assistant 实例
     logger.info("")
@@ -264,32 +296,29 @@ async def entrypoint(ctx: JobContext):
     # 初始化 AgentSession
     # ========================================================================
     session = AgentSession(
-        # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
-        # See all available models at https://docs.livekit.io/agents/models/stt/
-        # stt = openai.STT(
-        #     model="gpt-4o-transcribe",
-        #     api_key=api_key,
-        #     base_url=base_url
-        # ),
-        # stt=groq.STT(
-        #     model="whisper-large-v3-turbo",
-        #     api_key=api_key,
-        #     base_url=base_url,
+        # stt=inference.STT(
+        #     model="cartesia/ink-whisper", 
         #     language="zh"
         # ),
-        stt=inference.STT(
-            model="deepgram/nova-2", 
-            language="zh"
+        # stt = openai.STT(
+        #     model="gpt-4o-mini-transcribe",
+        #     base_url=base_url, 
+        #     api_key=api_key,
+        #     language="zh"
+        # ),
+
+        stt=deepgram.STTv2(
+            model="flux-general-en",
+            eager_eot_threshold=0.4,
+            api_key=deepgram_api_key
+            # base_url = "https://api.deepgram.com/v1/listen"
         ),
-        # # # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-        # # # See all available models at https://docs.livekit.io/agents/models/llm/
+        
         llm=openai.LLM.with_x_ai(
             model="grok-4.1", 
             base_url=base_url, 
             api_key=api_key
         ),
-        # # # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
-        # # # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts = openai.TTS(
             model="gpt-4o-mini-tts",
             voice="ash",
@@ -297,46 +326,18 @@ async def entrypoint(ctx: JobContext):
             base_url=base_url, 
             api_key=api_key
         ),
-        
-
-        # realtime 线路
-        # llm=openai.realtime.RealtimeModel(voice="marin"),
-        # llm=openai.realtime.RealtimeModel(
-        #     base_url=base_url, 
-        #     api_key=api_key,
-        #     turn_detection=TurnDetection(
-        #         type="server_vad",
-        #         threshold=0.5,
-        #         prefix_padding_ms=300,
-        #         silence_duration_ms=500,
-        #         create_response=True,
-        #         interrupt_response=True,
-        #     )
-        # ),
-
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        # See more at https://docs.livekit.io/agents/build/turns
-        # turn_detection=MultilingualModel(),
-        # turn_detection="vad",
-        # vad=silero.VAD.load(),
-
-        # allow the LLM to generate a response while waiting for the end of turn
-        # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
-        # preemptive_generation=True,
-
-        # sometimes background noise could interrupt the agent session, these are considered false positive interruptions
-        # # when it's detected, you may resume the agent's speech
-        # resume_false_interruption=True,
-        # false_interruption_timeout=1.0,
+        turn_detection="vad",
+        vad=silero.VAD.load(),
     )
     
     # ========================================================================
     # MemU 记忆层集成：监听对话并保存
     # ========================================================================
-    conversation_buffer = []  # 用于累积对话内容
-    turn_count = 0  # 记录对话轮次
-    current_user_message = None  # 当前用户消息
-    current_agent_message = None  # 当前助手消息
+    conversation_buffer = []
+    full_conversation = []
+    turn_count = 0
+    current_user_message = None
+    current_agent_message = None
     
     # ========================================================================
     # AgentSession 官方事件（参考 https://docs.livekit.io/home/client/events/）
@@ -388,15 +389,13 @@ async def entrypoint(ctx: JobContext):
             # 如果内容非空，进行解析并输出
             if isinstance(content, str) and content.strip():
                 if role == "user":
-                    logger.info(f"用户提问: {content}")  # 显示用户问题
+                    # logger.info(f"用户提问: {content}")  # 显示用户问题
                     nonlocal current_user_message
                     current_user_message = content
                 elif role == "assistant":
-                    logger.info(f"助手回答: {content}")  # 显示助手回答
+                    # logger.info(f"助手回答: {content}")  # 显示助手回答
                     nonlocal current_agent_message, conversation_buffer, turn_count
                     current_agent_message = content  # 赋值给 current_agent_message
-
-                    logger.debug(f"current_message:{current_agent_message}")
 
                     # 如果用户提问存在，保存对话并清空当前消息
                     if current_user_message:
@@ -406,36 +405,43 @@ async def entrypoint(ctx: JobContext):
                             {"role": "assistant", "content": current_agent_message}
                         ]
                         conversation_buffer.extend(conversation_context)
+                        full_conversation.extend(conversation_context)
                         logger.debug(f"[LiveKit] 当前对话缓冲区内容: {conversation_buffer}")
                         current_user_message = None
                         current_agent_message = None
 
-                        if len(conversation_buffer) >= 5:
+                        if len(conversation_buffer) >= 4:
                             logger.debug(f"[LiveKit] 缓冲区已满，准备保存对话到 MemU")
                             asyncio.create_task(
                                 save_conversation_to_memu(
-                                    conversation_buffer.copy(),
+                                    full_conversation.copy(),
                                     user_id,
-                                    agent_id
+                                    agent_id,
+                                    assistant,
+                                    base_instructions
                                 )
                             )
                             conversation_buffer.clear()
+                            
 
 
     @session.on("close")
     def on_session_close(reason=None):
         """当 session 关闭时触发"""
         logger.info(f"[LiveKit] ⛔ AgentSession closed. reason={reason}")
-        nonlocal conversation_buffer
-        if len(conversation_buffer) >= 5:
+        nonlocal conversation_buffer, full_conversation
+        if len(full_conversation) >= 4:
             asyncio.create_task(
                 save_conversation_to_memu(
-                    conversation_buffer.copy(),
+                    full_conversation.copy(),
                     user_id,
-                    agent_id
+                    agent_id,
+                    assistant,
+                    base_instructions
                 )
             )
             conversation_buffer.clear()
+            full_conversation.clear()
     
     # ========================================================================
     # 启动对话会话
@@ -486,18 +492,11 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"[MEMU] 无法注册事件 '{event_name}': {e}")
 
-    # 移除初始问候的 LLM 生成，避免在没有任何用户消息时触发空会话错误
-    
+
+
     # await session.generate_reply(
     #     instructions="对用户打招呼并且表达你的帮助"
     # )
-
-
-    # ========================================================================
-    # 会话结束时保存剩余的对话
-    # ========================================================================
-    # 注意：这里需要在会话结束时调用，但 LiveKit 可能没有直接的结束事件
-    # 可以考虑在房间断开连接时保存
 
 
 if __name__ == "__main__":
