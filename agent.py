@@ -20,13 +20,11 @@ from livekit.agents import (
     cli,
     metrics,
     room_io,
-    voice,
 )
 
 from livekit.plugins import silero
-
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.plugins import openai
+from openai.types.beta.realtime.session import TurnDetection
 
 # uncomment to enable Krisp background voice/noise cancellation
 # from livekit.plugins import noise_cancellation
@@ -36,7 +34,7 @@ logger = logging.getLogger("basic-agent")
 
 #OPENAI-API
 load_dotenv(override=True)
-api_key = os.getenv("OPENAI_APIKEY")  # 获取键为 API_KEY 的值
+api_key = os.getenv("OPENAI_APIKEY")
 base_url = os.getenv("BASE_URL")
 memu_api_key = os.getenv("MEMU_API_KEY")  # MemU API 密钥
 
@@ -273,19 +271,25 @@ async def entrypoint(ctx: JobContext):
         #     api_key=api_key,
         #     base_url=base_url
         # ),
+        # stt=groq.STT(
+        #     model="whisper-large-v3-turbo",
+        #     api_key=api_key,
+        #     base_url=base_url,
+        #     language="zh"
+        # ),
         stt=inference.STT(
             model="deepgram/nova-2", 
             language="zh"
         ),
-        # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
-        # See all available models at https://docs.livekit.io/agents/models/llm/
-        llm=openai.LLM(
-            model="gpt-5", 
+        # # # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
+        # # # See all available models at https://docs.livekit.io/agents/models/llm/
+        llm=openai.LLM.with_x_ai(
+            model="grok-4.1", 
             base_url=base_url, 
             api_key=api_key
         ),
-        # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
-        # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
+        # # # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
+        # # # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
         tts = openai.TTS(
             model="gpt-4o-mini-tts",
             voice="ash",
@@ -293,12 +297,28 @@ async def entrypoint(ctx: JobContext):
             base_url=base_url, 
             api_key=api_key
         ),
+        
+
+        # realtime 线路
+        # llm=openai.realtime.RealtimeModel(voice="marin"),
+        # llm=openai.realtime.RealtimeModel(
+        #     base_url=base_url, 
+        #     api_key=api_key,
+        #     turn_detection=TurnDetection(
+        #         type="server_vad",
+        #         threshold=0.5,
+        #         prefix_padding_ms=300,
+        #         silence_duration_ms=500,
+        #         create_response=True,
+        #         interrupt_response=True,
+        #     )
+        # ),
 
         # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
         # See more at https://docs.livekit.io/agents/build/turns
         # turn_detection=MultilingualModel(),
-        turn_detection="vad",
-        vad=silero.VAD.load(),
+        # turn_detection="vad",
+        # vad=silero.VAD.load(),
 
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
@@ -390,8 +410,7 @@ async def entrypoint(ctx: JobContext):
                         current_user_message = None
                         current_agent_message = None
 
-                        # 每当积累到2条对话后，保存对话
-                        if len(conversation_buffer) >= 2:
+                        if len(conversation_buffer) >= 5:
                             logger.debug(f"[LiveKit] 缓冲区已满，准备保存对话到 MemU")
                             asyncio.create_task(
                                 save_conversation_to_memu(
@@ -407,6 +426,16 @@ async def entrypoint(ctx: JobContext):
     def on_session_close(reason=None):
         """当 session 关闭时触发"""
         logger.info(f"[LiveKit] ⛔ AgentSession closed. reason={reason}")
+        nonlocal conversation_buffer
+        if len(conversation_buffer) >= 5:
+            asyncio.create_task(
+                save_conversation_to_memu(
+                    conversation_buffer.copy(),
+                    user_id,
+                    agent_id
+                )
+            )
+            conversation_buffer.clear()
     
     # ========================================================================
     # 启动对话会话
@@ -457,10 +486,13 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"[MEMU] 无法注册事件 '{event_name}': {e}")
 
-    await session.generate_reply(
-        instructions="对用户打招呼并且表达你的帮助"
-    )
+    # 移除初始问候的 LLM 生成，避免在没有任何用户消息时触发空会话错误
     
+    # await session.generate_reply(
+    #     instructions="对用户打招呼并且表达你的帮助"
+    # )
+
+
     # ========================================================================
     # 会话结束时保存剩余的对话
     # ========================================================================
