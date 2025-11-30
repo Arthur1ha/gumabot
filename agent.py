@@ -238,11 +238,6 @@ async def refresh_memories_and_update_prompt_fallback(user_id: str, agent_id: st
 
 class Assistant(Agent):
     def __init__(self, instructions: str = None) -> None:
-        # base_instructions = """你是一个有用的语音人工智能助手。你热心地帮助用户解答他们的问题，从你广博的知识中提供信息。
-        #     你的回答简洁明了，没有任何复杂的格式或标点符号，包括表情符号、星号或其他符号。你好奇、友善，而且有幽默感。将回复内容控制在20字以内"""
-        
-        # final_instructions = instructions if instructions else base_instructions
-        # super().__init__(instructions=final_instructions)
         super().__init__(instructions=instructions)
 
 server = AgentServer()
@@ -279,8 +274,7 @@ async def entrypoint(ctx: JobContext):
     # 构建包含记忆的系统提示词
     logger.info("")
     logger.info("[MEMU] 🔨 构建系统提示词...")
-    base_instructions = """你是一个有用的语音人工智能助手。你热心地帮助用户解答他们的问题，从你广博的知识中提供信息。
-            你的回答简洁明了，没有任何复杂的格式或标点符号，包括表情符号、星号或其他符号。你好奇、友善，而且有幽默感。将回复内容控制在20字以内"""
+    base_instructions = """"""
     logger.info(f"[MEMU] 🧭 基础系统提示词: {base_instructions}")
     dynamic_instructions = build_system_prompt_with_memories(base_instructions, user_memories)
     logger.info(f"[MEMU] 🔧 动态系统提示词: {dynamic_instructions}")
@@ -462,37 +456,6 @@ async def entrypoint(ctx: JobContext):
     logger.info("[MEMU] ✅ AgentSession 启动完成")
     logger.info("[MEMU] 📡 现在正在监听对话事件...")
     
-    # 调试：列出 session 对象的所有可用事件
-    try:
-        if hasattr(session, '_event_emitter'):
-            emitter = session._event_emitter
-            if hasattr(emitter, '_listeners'):
-                events = list(emitter._listeners.keys())
-                logger.info(f"[MEMU] 🔍 可用事件列表: {events}")
-    except Exception as e:
-        logger.debug(f"[MEMU] 无法列出事件: {e}")
-    
-    # 尝试监听所有可能的 transcript 相关事件
-    possible_events = [
-        "user_transcript", "agent_transcript", "transcript",
-        "user_speech", "agent_speech", "speech",
-        "user_message", "agent_message", "message"
-    ]
-    
-    for event_name in possible_events:
-        try:
-            @session.on(event_name)
-            def debug_event_handler(*args, **kwargs):
-                logger.info(f"[MEMU] 🔔 事件 '{event_name}' 被触发！")
-                logger.info(f"[MEMU]   参数数量: {len(args)}, 关键字参数: {list(kwargs.keys())}")
-                if args:
-                    logger.info(f"[MEMU]   第一个参数类型: {type(args[0]).__name__}")
-                    if hasattr(args[0], 'text'):
-                        logger.info(f"[MEMU]   文本内容: {args[0].text[:100]}")
-        except Exception as e:
-            logger.debug(f"[MEMU] 无法注册事件 '{event_name}': {e}")
-
-
 
     # await session.generate_reply(
     #     instructions="对用户打招呼并且表达你的帮助"
